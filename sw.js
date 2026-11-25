@@ -2,7 +2,7 @@
 // - 앱 화면(index.html 등)은 "네트워크 먼저": 새 버전이 있으면 바로 받고, 오프라인이면 저장본으로 열림
 // - 라이브러리·글꼴(CDN)은 저장본을 먼저 쓰고 뒤에서 새로 받아 둠
 // - Supabase 데이터 요청은 절대 저장하지 않음 (항상 서버에서 최신 데이터)
-const CACHE = 'ledger-v1';
+const CACHE = 'ledger-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 const CDN = ['cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'];
 
@@ -23,8 +23,9 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
 
   if (url.origin === location.origin) {
+    // 브라우저 HTTP 캐시를 건너뛰고 서버에 확인 → 수정한 내용이 바로 반영됨
     e.respondWith(
-      fetch(req).then(res => {
+      fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }).then(res => {
         if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
         return res;
       }).catch(() => caches.match(req, { ignoreSearch: true })

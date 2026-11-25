@@ -169,6 +169,17 @@ select.text-in{appearance:auto}
 .open-link .text-in{flex:1;min-width:0}
 .open-link .btn{flex:none;height:46px;padding:0 18px;font-size:15px}
 
+/* OCR import */
+.file-btn{display:flex;align-items:center;justify-content:center;cursor:pointer}
+.ocr-row{border:1px solid var(--line);border-radius:14px;padding:10px;margin-top:10px}
+.ocr-row.off{opacity:.5}
+.ocr-top{display:flex;gap:8px;align-items:center}
+.ocr-top input[type=checkbox]{width:22px;height:22px;accent-color:var(--mint);flex:none}
+.ocr-top .text-in{flex:1;min-width:0;height:40px}
+.ocr-grid{display:grid;grid-template-columns:1.3fr .8fr 1fr 1fr;gap:6px;margin-top:8px}
+.ocr-grid .text-in{height:40px;padding:0 8px;font-size:14px;min-width:0}
+#ocrRaw{white-space:pre-wrap;font-size:12px;background:var(--surface);border-radius:10px;padding:10px;max-height:200px;overflow:auto}
+
 /* login */
 .login-card{background:var(--surface);border-radius:18px;padding:18px;margin-top:18px}
 .login-card .chips{margin-bottom:18px}
@@ -404,6 +415,21 @@ select.text-in{appearance:auto}
   </div>
   <button class="btn ghost wide" id="sExport" hidden>📥 여행 기록 저장</button>
   <button class="danger-link" id="sDelete" hidden>이 여행 삭제</button>
+</div>
+
+<!-- OCR sheet -->
+<div class="sheet" id="ocrSheet" role="dialog" aria-modal="true" aria-labelledby="ocrTitle">
+  <div class="grab"></div>
+  <h2 id="ocrTitle">캡처로 내 지출 추가</h2>
+  <p class="msub" style="margin:-8px 0 14px">트래블월렛, 신한 SOL 같은 결제 내역 화면을 캡처해서 골라 주세요. 글자는 이 휴대폰 안에서 읽고, 캡처는 어디에도 올라가지 않아요.</p>
+  <label class="btn primary wide file-btn" style="margin-top:0">🖼️ 캡처 고르기<input type="file" id="ocrFile" accept="image/*" multiple hidden></label>
+  <div id="ocrStatus" class="status" hidden></div>
+  <div id="ocrList"></div>
+  <details id="ocrRawWrap" class="note" hidden><summary>읽은 글자 그대로 보기</summary><pre id="ocrRaw"></pre></details>
+  <div class="row-btns" style="margin-top:16px">
+    <button class="btn ghost" id="ocrCancel">닫기</button>
+    <button class="btn primary" id="ocrSave" disabled>추가</button>
+  </div>
 </div>
 
 <!-- save sheet -->
@@ -755,7 +781,9 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
   // 가계부: 내 개인 지출 + 내가 끼어 있는 공동 지출의 내 몫
   function renderMine(){
     const el=$('mineView');
-    const lock=`<div class="lock">🔒 개인 지출은 ${esc(mName(me))}님만 볼 수 있어요. 공동 지출은 내 몫만 보여요.</div>`;
+    const lock=`<div class="lock">🔒 개인 지출은 ${esc(mName(me))}님만 볼 수 있어요. 공동 지출은 내 몫만 보여요.</div>`
+      +`<button class="btn ghost wide" data-ocr style="margin-top:10px;height:46px;font-size:15px">📷 결제 내역 캡처로 추가</button>`;
+    setTimeout(()=>{const b=el.querySelector('[data-ocr]');if(b)b.onclick=openOcr});
     const rows=[...mine.map(x=>({x,kind:'personal',krw:toKRW(x),day:x.day,t:x.created_at})),
       ...expenses.filter(x=>shareOf(x)>0).map(x=>({x,kind:'shared',krw:shareOf(x),day:x.day,t:x.created_at}))]
       .sort((a,b)=>a.t<b.t?-1:1);
@@ -821,7 +849,7 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
 
   /* ---------- sheets ---------- */
   function openSheet(id){$('scrim').classList.add('open');$(id).classList.add('open')}
-  function closeSheets(){$('scrim').classList.remove('open');['expSheet','setSheet','planSheet','saveSheet'].forEach(i=>$(i).classList.remove('open'))}
+  function closeSheets(){$('scrim').classList.remove('open');['expSheet','setSheet','planSheet','saveSheet','ocrSheet'].forEach(i=>$(i).classList.remove('open'))}
   $('scrim').onclick=closeSheets;
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeSheets()});
 
@@ -965,6 +993,141 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
     if(!pform.id||!confirm('이 일정을 삭제할까요?\n연결된 비용 기록은 정산과 가계부에 그대로 남아요.')) return;
     try{await rpc('delete_plan',{p_token:token(),p_id:pform.id});closeSheets();toast('삭제했어요');await load(trip.id,true);notify()}
     catch(e){toast(errMsg(e))}
+  };
+
+  /* ---------- 캡처로 내 지출 추가 (무료 글자 인식, 휴대폰 안에서만 처리) ---------- */
+  const OCR_LIB='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+  let ocrWorker=null, ocrRows=[];
+  function loadScript(src){return new Promise((ok,no)=>{const s=document.createElement('script');s.src=src;s.onload=ok;s.onerror=()=>no(new Error('fetch failed'));document.head.appendChild(s)})}
+  function ocrStatus(t){const el=$('ocrStatus');el.hidden=!t;el.textContent=t||''}
+  function openOcr(){ocrRows=[];drawOcr();ocrStatus('');$('ocrRawWrap').hidden=true;$('ocrFile').value='';closeSheets();openSheet('ocrSheet')}
+  async function ocrEngine(){
+    if(!window.Tesseract){ocrStatus('글자 인식 도구를 받는 중… (처음 한 번만, 와이파이 권장)');await loadScript(OCR_LIB)}
+    if(!ocrWorker){
+      ocrWorker=await Tesseract.createWorker(['kor','eng'],1,{logger:m=>{
+        if(m.status==='loading language traineddata') ocrStatus(`글자 데이터를 받는 중… ${Math.round((m.progress||0)*100)}% (처음 한 번만)`);
+        else if(m.status==='recognizing text') ocrStatus(`글자 읽는 중… ${Math.round((m.progress||0)*100)}%`);
+      }});
+    }
+    return ocrWorker;
+  }
+  // 흑백으로 바꾸고, 어두운 화면(다크 모드) 캡처는 반전해서 인식률을 높임
+  async function prepImage(file){
+    const img=await new Promise((ok,no)=>{const i=new Image();i.onload=()=>ok(i);i.onerror=no;i.src=URL.createObjectURL(file)});
+    const scale=Math.min(2,Math.max(1,1200/img.width),2400/img.width);
+    const c=document.createElement('canvas');c.width=Math.round(img.width*scale);c.height=Math.round(img.height*scale);
+    const g=c.getContext('2d');g.drawImage(img,0,0,c.width,c.height);URL.revokeObjectURL(img.src);
+    const d=g.getImageData(0,0,c.width,c.height),p=d.data;let sum=0;
+    for(let i=0;i<p.length;i+=4){const y=0.299*p[i]+0.587*p[i+1]+0.114*p[i+2];p[i]=p[i+1]=p[i+2]=y;sum+=y}
+    if(sum/(p.length/4)<110) for(let i=0;i<p.length;i+=4){p[i]=p[i+1]=p[i+2]=255-p[i]}
+    g.putImageData(d,0,0); return c;
+  }
+  const CAT_WORDS=[
+    ['cafe',/카페|커피|coffee|cafe|스타벅스|starbucks|doutor|tully|blue ?bottle/i],
+    ['move',/jr|메트로|metro|지하철|철도|rail|suica|pasmo|icoca|택시|taxi|버스|bus|keisei|게이세이|skyliner|스카이라이너|narita express|n'?ex/i],
+    ['stay',/호텔|hotel|숙소|agoda|아고다|booking|inn|mimaru|미마루/i],
+    ['drink',/맥주|beer|bar|이자카야|izakaya|brew|pub|와인|wine/i],
+    ['tour',/팀랩|teamlab|museum|박물관|미술관|tower|타워|입장|ticket|티켓|전망/i],
+    ['shop',/편의점|lawson|로손|family ?mart|패밀리|seven|세븐|7-?eleven|uniqlo|유니클로|돈키|donki|don quijote|drug|드럭|마츠모토|matsumoto|daiso|다이소|loft|로프트|백화점|mitsukoshi|미츠코시|matsuya|ginza six|parco|파르코|무인양품|muji|louis|루이비통/i],
+    ['food',/라멘|ramen|스시|sushi|식당|restaurant|yoshinoya|요시노야|sukiya|스키야|matsuya food|규동|우동|udon|소바|soba|pizza|피자|버거|burger|mcdonald|맥도날드|이치란|ichiran|식사|런치|lunch|dinner/i]
+  ];
+  const guessCat=t=>(CAT_WORDS.find(([,re])=>re.test(t))||['etc'])[0];
+  const SKIP=/충전|환전|잔액|잔고|합계|총\s*액|총\s*금액|한도|입금|환불|취소|이자|balance|total|top ?up|exchange/i;
+  const NOISE=/승인|결제|사용|일시불|해외|국내|체크|카드|완료|이용|가맹점|금액|원화|외화|환산|신한|SOL|트래블월렛|travel ?wallet|travelwallet/gi;
+  function parseOcr(text,fallbackDay){
+    const c=fx(), code=trip.fx_cur, reEsc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    const NUM='(\\d{1,3}(?:,\\d{3})+(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)';
+    const fxTok=[reEsc(c.sym),code,...(code==='JPY'?['¥','엔']:[])].join('|');
+    const reFx=new RegExp(`(?:${fxTok})\\s*[-−]?\\s*${NUM}|${NUM}\\s*(?:${fxTok})`,'i');
+    // 글자 인식은 ₩를 \ 로 읽는 경우가 많음
+    const reKrw=new RegExp(`(?:₩|KRW|\\\\)\\s*[-−]?\\s*${NUM}|${NUM}\\s*원`,'i');
+    // 통화 표시 없이 줄 끝에 있는 쉼표 금액 (예: "STARBUCKS 5,420", "45,3002!"처럼 원이 깨진 경우)
+    const reBare=/(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?)(?!.*\d,\d{3})/;
+    const bareCur=/원|₩|KRW|\\\d|승인|체크|신한/.test(text)?'KRW':'FX';
+    const norm=s=>s.replace(/[０-９]/g,ch=>String.fromCharCode(ch.charCodeAt(0)-65248)).replace(/￥/g,'¥').replace(/，/g,',').replace(/(\d)\s*,\s*(\d{3})/g,'$1,$2').replace(/\s+/g,' ').trim();
+    const dayKeys=new Set(days().map(d=>d.key));
+    const year=+trip.start_date.slice(0,4);
+    const reDateFull=/(20\d{2})\s*[.\-\/년]\s*(\d{1,2})\s*[.\-\/월]\s*(\d{1,2})/;
+    const reDateShort=/(?:^|[^\d.,])(\d{1,2})\s*(?:[.\/]|월\s*)(\d{1,2})\s*일?(?![\d,])/;
+    const dateIn=s=>{let m=s.match(reDateFull);if(m)return{key:ymd(new Date(+m[1],m[2]-1,+m[3])),raw:m[0]};
+      m=s.match(reDateShort);if(m&&+m[1]>=1&&+m[1]<=12&&+m[2]>=1&&+m[2]<=31)return{key:ymd(new Date(year,m[1]-1,+m[2])),raw:m[0]};return null};
+    const clean=s=>s.replace(NOISE,' ').replace(/\b\d{1,2}:\d{2}(:\d{2})?\b/g,' ').replace(/[|_~=<>*#@"'`()[\]{}·•:;+−-]+/g,' ').replace(/\s+/g,' ').trim();
+    const letters=s=>(s.match(/[가-힣A-Za-z぀-ヿ一-鿿]/g)||[]).length;
+    let curDay=null, lastText='';
+    const out=[];
+    text.split(/\n/).map(norm).filter(Boolean).forEach(line=>{
+      const dt0=dateIn(line);   // 날짜(2026.12.07)를 금액으로 착각하지 않도록 먼저 떼어 냄
+      const body=dt0?line.replace(dt0.raw,' '):line;
+      const m=body.match(reFx), k=m?null:body.match(reKrw), b=(m||k)?null:body.match(reBare);
+      const hit=m||k||b;
+      let rest=hit?line.replace(hit[0],' '):line;
+      const dt=dateIn(rest);
+      if(dt){if(dayKeys.has(dt.key))curDay=dt.key;else curDay='out';rest=rest.replace(dt.raw,' ')}
+      if(!hit){const t=clean(rest);if(letters(t)>=2&&!SKIP.test(t))lastText=t;return}
+      const amount=Number((hit[1]||hit[2]).replace(/,/g,''));
+      if(!(amount>0&&amount<1e9))return;
+      let title=clean(rest.replace(/[+\-−]?\s*\d+[!lI|]*\s*$/,' ')); if(letters(title)<2) title=lastText;
+      const plus=/\+\s*(?:[¥₩\\]|KRW|JPY)?\s*\d/.test(line);   // + 는 충전·입금
+      const skip=plus||SKIP.test(line)||SKIP.test(title);
+      out.push({use:!skip&&curDay!=='out',title:title.slice(0,60),amount,currency:m?'FX':k?'KRW':bareCur,
+        day:curDay&&curDay!=='out'?curDay:fallbackDay,category:guessCat(title+' '+line)});
+      lastText='';
+    });
+    // 같은 내용이 두 번 잡힌 경우(외화 + 원화 표시) 하나만
+    return out.filter((r,i)=>!out.slice(0,i).some(o=>o.title===r.title&&o.day===r.day&&o.amount===r.amount&&o.currency===r.currency));
+  }
+  function drawOcr(){
+    const c=fx();
+    const dayOpts=days().map(d=>`<option value="${d.key}">${esc(d.key==='pre'?'여행 전':d.short)}</option>`).join('');
+    const catOpts=CATS.map(x=>`<option value="${x.id}">${x.e} ${x.n}</option>`).join('');
+    $('ocrList').innerHTML=ocrRows.map((r,i)=>`<div class="ocr-row${r.use?'':' off'}" data-i="${i}">
+      <div class="ocr-top"><input type="checkbox" data-f="use" ${r.use?'checked':''} aria-label="추가할지 선택"><input class="text-in" data-f="title" value="${esc(r.title)}" maxlength="60" placeholder="내용"></div>
+      <div class="ocr-grid"><input class="text-in num" data-f="amount" inputmode="decimal" value="${esc(fmt(r.amount,2))}" aria-label="금액">
+      <select class="text-in" data-f="currency" aria-label="통화"><option value="FX">${esc(c.sym)}</option><option value="KRW">₩</option></select>
+      <select class="text-in" data-f="day" aria-label="날짜">${dayOpts}</select>
+      <select class="text-in" data-f="category" aria-label="분류">${catOpts}</select></div></div>`).join('');
+    $('ocrList').querySelectorAll('.ocr-row').forEach(row=>{
+      const r=ocrRows[+row.dataset.i];
+      row.querySelectorAll('select').forEach(s=>{s.value=r[s.dataset.f];s.onchange=()=>{r[s.dataset.f]=s.value}});
+      row.querySelector('[data-f=use]').onchange=e=>{r.use=e.target.checked;row.classList.toggle('off',!r.use);updOcr()};
+      row.querySelector('[data-f=title]').oninput=e=>{r.title=e.target.value};
+      row.querySelector('[data-f=amount]').oninput=e=>{r.amount=Number(parseAmt(e.target.value))||0;updOcr()};
+    });
+    updOcr();
+  }
+  function updOcr(){
+    const n=ocrRows.filter(r=>r.use&&r.amount>0).length;
+    $('ocrSave').disabled=!n; $('ocrSave').textContent=n?`${n}건 추가`:'추가';
+  }
+  $('ocrFile').onchange=async e=>{
+    const files=[...e.target.files]; if(!files.length) return;
+    $('ocrFile').disabled=true; const raw=[];
+    try{
+      const w=await ocrEngine(); const fb=todayKey(); let found=[];
+      for(let i=0;i<files.length;i++){
+        ocrStatus(`글자 읽는 중… (${i+1}/${files.length})`);
+        const {data}=await w.recognize(await prepImage(files[i]));
+        raw.push(data.text); found=found.concat(parseOcr(data.text,fb));
+      }
+      ocrRows=ocrRows.concat(found); drawOcr();
+      ocrStatus(found.length?`${found.length}건을 찾았어요. 내용과 금액을 확인하고 추가할 것만 체크해 주세요.`:'금액을 찾지 못했어요. 결제 내역이 크게 보이게 캡처해 보세요.');
+      $('ocrRaw').textContent=raw.join('\n\n— — —\n\n'); $('ocrRawWrap').hidden=false;
+    }catch(err){ocrStatus('글자를 읽지 못했어요. '+errMsg(err))}
+    finally{$('ocrFile').disabled=false;$('ocrFile').value=''}
+  };
+  $('ocrCancel').onclick=closeSheets;
+  $('ocrSave').onclick=async()=>{
+    const rows=ocrRows.filter(r=>r.use&&r.amount>0); if(!rows.length) return;
+    $('ocrSave').disabled=true; let ok=0;
+    try{
+      for(const r of rows){
+        await rpc('save_personal',{p_token:token(),p_id:null,p_amount:r.amount,p_currency:r.currency,p_category:r.category,
+          p_title:(r.title||'').trim().slice(0,60),p_day:r.day,p_plan:null});
+        ok++; r.use=false;   // 다시 눌러도 중복으로 들어가지 않게
+      }
+      closeSheets(); toast(`내 지출 ${ok}건을 추가했어요`);
+    }catch(e){toast(`${ok}건 추가 후 멈췄어요. `+errMsg(e))}
+    finally{await load(trip.id,true);drawOcr()}
   };
 
   /* ---------- 여행 기록 저장 ---------- */
