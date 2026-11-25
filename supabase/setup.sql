@@ -98,6 +98,29 @@ alter table public.personal_expenses add column if not exists plan_id uuid refer
 create index if not exists expenses_plan_idx on public.expenses (plan_id);
 create index if not exists personal_plan_idx on public.personal_expenses (plan_id);
 
+-- 짧은 여행 코드 (헷갈리는 글자 0 O 1 I L 제외, 6자리) — 링크와 앱 입력용
+create or replace function public._new_trip_code()
+returns text
+language plpgsql volatile set search_path = public as $$
+declare a text := 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; c text;
+begin
+  loop
+    c := '';
+    for i in 1..6 loop
+      c := c || substr(a, 1 + floor(random() * length(a))::int, 1);
+    end loop;
+    exit when not exists (select 1 from trips where code = c);
+  end loop;
+  return c;
+end $$;
+revoke all on function public._new_trip_code() from public, anon, authenticated;
+
+alter table public.trips add column if not exists code text;
+update public.trips set code = public._new_trip_code() where code is null;
+alter table public.trips alter column code set default public._new_trip_code();
+alter table public.trips alter column code set not null;
+create unique index if not exists trips_code_key on public.trips (code);
+
 -- 테이블 직접 접근 차단
 alter table public.trips             enable row level security;
 alter table public.expenses          enable row level security;
@@ -137,6 +160,13 @@ language sql stable security definer set search_path = public as $$
     'fx_cur', t.fx_cur, 'members', t.members,
     'pw_set', coalesce((select jsonb_agg(c.member_id) from trip_creds c where c.trip_id = t.id), '[]'::jsonb))
   from trips t where t.id = p_trip
+$$;
+
+-- 여행 코드 → 여행 ID
+create or replace function public.resolve_trip(p_code text)
+returns uuid
+language sql stable security definer set search_path = public as $$
+  select id from trips where code = upper(trim(p_code))
 $$;
 
 -- 처음이면 비밀번호를 정하고, 아니면 확인한 뒤 세션 토큰을 돌려줌
@@ -203,17 +233,17 @@ create or replace function public.create_trip(
   p_start date, p_end date, p_members jsonb, p_pw text
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
-declare v_id uuid; v_me text; v_tok uuid;
+declare v_id uuid; v_code text; v_me text; v_tok uuid;
 begin
   if p_pw is null or char_length(p_pw) < 4 or char_length(p_pw) > 64 then raise exception 'short password'; end if;
   v_me := p_members -> 0 ->> 'id';
   if v_me is null then raise exception 'no members'; end if;
   insert into trips (name, fx_cur, fx_unit, rate, start_date, end_date, members)
   values (p_name, p_fx_cur, p_fx_unit, p_rate, p_start, p_end, p_members)
-  returning id into v_id;
+  returning id, code into v_id, v_code;
   insert into trip_creds (trip_id, member_id, pw_hash) values (v_id, v_me, crypt(p_pw, gen_salt('bf')));
   insert into trip_sessions (trip_id, member_id) values (v_id, v_me) returning token into v_tok;
-  return jsonb_build_object('id', v_id, 'token', v_tok, 'member', v_me);
+  return jsonb_build_object('id', v_id, 'code', v_code, 'token', v_tok, 'member', v_me);
 end $$;
 
 -- 여행 전체 불러오기: 공동 지출 + 일정표 + "내" 개인 지출만
@@ -387,6 +417,7 @@ end $$;
 -- ---------------------------------------------------------------- 권한
 grant execute on function
   public.trip_public(uuid),
+  public.resolve_trip(text),
   public.login(uuid, text, text),
   public.logout(uuid),
   public.reset_password(uuid, text),

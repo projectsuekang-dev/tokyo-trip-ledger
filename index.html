@@ -212,7 +212,7 @@ select.text-in{appearance:auto}
   <div id="setupMsg" class="setup" hidden></div>
   <button class="btn primary wide" id="newTripBtn">＋ 새 여행 만들기</button>
   <form class="open-link" id="openForm">
-    <input id="openLink" class="text-in" placeholder="받은 여행 링크 붙여넣기" autocomplete="off" aria-label="여행 링크">
+    <input id="openLink" class="text-in" placeholder="여행 코드 6자리 또는 링크" autocomplete="off" autocapitalize="characters" aria-label="여행 코드 또는 링크">
     <button type="submit" class="btn ghost">열기</button>
   </form>
   <div class="section-label" id="myTripsLabel" hidden>이 기기에서 연 여행</div>
@@ -478,7 +478,7 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
   function saveMyTrips(list){try{localStorage.setItem(LS_KEY,JSON.stringify(list.slice(0,50)))}catch(_){}}
   function remember(t){
     const list=myTrips().filter(x=>x.id!==t.id);
-    list.unshift({id:t.id,name:t.name,start:t.start_date,end:t.end_date,cur:t.fx_cur});
+    list.unshift({id:t.id,code:t.code,name:t.name,start:t.start_date,end:t.end_date,cur:t.fx_cur});
     saveMyTrips(list);
   }
   function forget(id){saveMyTrips(myTrips().filter(x=>x.id!==id))}
@@ -523,11 +523,32 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
   }
 
   /* ---------- routing ---------- */
-  function route(){
+  // 주소 뒤 #는 여행 코드(예: #XNP7AE) 또는 예전 링크의 여행 ID
+  const codeRe=/^[A-Za-z0-9]{6}$/;
+  let curId=null;   // 지금 화면에 띄우려는 여행 ID (늦게 도착한 응답 무시용)
+  async function route(){
     closeSheets();
-    const id=location.hash.slice(1);
-    if(uuidRe.test(id)) openTrip(id); else showHome();
+    const key=location.hash.slice(1);
+    if(uuidRe.test(key)){curId=key;return openTrip(key)}
+    if(codeRe.test(key)){
+      const code=key.toUpperCase();
+      let id=(myTrips().find(t=>t.code===code)||{}).id;
+      curId='code:'+code;
+      if(!id){
+        leaveTrip(); document.title='여행 가계부';
+        showOnly('loginView'); $('loginForm').hidden=true; $('loginTrip').textContent='여행'; $('loginDate').textContent='';
+        const st=$('loginStatus'); st.hidden=false; st.textContent='불러오는 중…';
+        try{id=await rpc('resolve_trip',{p_code:code})}catch(e){st.textContent='불러오지 못했어요. '+errMsg(e);return}
+        if(curId!=='code:'+code) return;
+        if(!id){st.textContent=`‘${code}’ 여행을 찾을 수 없어요. 코드를 확인해 주세요.`;return}
+      }
+      curId=id; return openTrip(id);
+    }
+    curId=null; showHome();
   }
+  // 예전 긴 링크로 들어왔으면 주소를 짧은 코드로 바꿔 둠
+  function shortenUrl(){if(trip&&trip.code&&location.hash.slice(1)!==trip.code) history.replaceState(null,'','#'+trip.code)}
+  const tripUrl=()=>location.origin+location.pathname+'#'+(trip.code||trip.id);
   window.addEventListener('hashchange',route);
 
   function leaveTrip(){
@@ -543,16 +564,17 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
     showOnly('homeView');
     const list=myTrips();
     $('myTripsLabel').hidden=!list.length;
-    $('tripList').innerHTML=list.length?list.map(t=>`<button class="trip-card" data-id="${esc(t.id)}"><span class="flag">${curOf(t.cur).flag}</span><span><div class="t">${esc(t.name)}</div><div class="d num">${esc(dateRange(t.start,t.end))}</div></span><span class="chev" aria-hidden="true">›</span></button>`).join('')
+    $('tripList').innerHTML=list.length?list.map(t=>`<button class="trip-card" data-id="${esc(t.code||t.id)}"><span class="flag">${curOf(t.cur).flag}</span><span><div class="t">${esc(t.name)}</div><div class="d num">${esc(dateRange(t.start,t.end))}</div></span><span class="chev" aria-hidden="true">›</span></button>`).join('')
       :`<div class="empty"><div class="big">✈️</div><p>새 여행을 만들고 링크를 친구들에게 보내 보세요.<br>링크를 받은 사람은 자기 이름을 고르고 비밀번호를 정해서 들어와요.</p></div>`;
     $('tripList').querySelectorAll('.trip-card').forEach(b=>b.onclick=()=>{location.hash=b.dataset.id});
   }
   $('newTripBtn').onclick=()=>openSettings(true);
   $('openForm').onsubmit=e=>{
     e.preventDefault();
-    const m=$('openLink').value.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-    if(!m) return toast('여행 링크를 그대로 붙여 넣어 주세요.');
-    $('openLink').value=''; location.hash=m[0];
+    const v=$('openLink').value.trim();
+    const m=v.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)||v.match(/(?:#|^)([A-Za-z0-9]{6})$/);
+    if(!m) return toast('여행 코드 6자리나 링크를 넣어 주세요.');
+    $('openLink').value=''; location.hash=(m[1]||m[0]).replace(/^#/,'');
   };
 
   /* ---------- trip ---------- */
@@ -564,7 +586,7 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
     const st=$('loginStatus'); st.hidden=false; st.textContent='불러오는 중…';
     let t=null;
     try{t=await rpc('trip_public',{p_trip:id})}catch(e){st.textContent='불러오지 못했어요. '+errMsg(e);return}
-    if(location.hash.slice(1)!==id) return;
+    if(curId!==id) return;
     if(!t){forget(id);st.textContent='여행을 찾을 수 없어요. 삭제되었거나 링크가 잘못됐어요.';return}
     document.title=t.name+' | 여행 가계부';
     $('loginTrip').textContent=t.name;
@@ -636,12 +658,12 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
     if(!s){showLogin(id);return false}
     try{
       const res=await rpc('get_trip',{p_token:s.token});
-      if(location.hash.slice(1)!==id) return false;
+      if(curId!==id) return false;
       if(!res){setSess(id,null);showLogin(id);return false}
       trip=res.trip; trip.members=Array.isArray(trip.members)?trip.members:[];
       expenses=(res.expenses||[]).map(x=>({...x,split:Array.isArray(x.split)?x.split:[]}));
       plans=res.plans||[]; mine=res.mine||[]; me=res.me; pwSet=res.pw_set||[];
-      remember(trip); status(''); render(); return true;
+      remember(trip); shortenUrl(); status(''); render(); return true;
     }catch(e){
       if(/unauthorized/.test((e&&e.message)||'')){setSess(id,null);showLogin(id,'로그인이 만료됐어요. 다시 들어와 주세요.');return false}
       if(!quiet) status('불러오지 못했어요. '+errMsg(e));
@@ -662,7 +684,7 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
     const c=fx();
     document.title=trip.name+' | 여행 가계부';
     $('tripName').textContent=trip.name;
-    $('tripDate').innerHTML=`${esc(dateRange(trip.start_date,trip.end_date))}  ${trip.members.length}명<span class="me-tag">나: ${esc(mName(me))}</span>`;
+    $('tripDate').innerHTML=`${esc(dateRange(trip.start_date,trip.end_date))} · ${trip.members.length}명${trip.code?` · 코드 <b>${esc(trip.code)}</b>`:''}<span class="me-tag">나: ${esc(mName(me))}</span>`;
     $('curFx').textContent=c.sym;
     const rateTxt=`${trip.fx_unit===100?'100':'1'}${c.code} = ${fmt(trip.rate,2)}원`;
     const sharedTotal=expenses.reduce((t,x)=>t+toKRW(x),0);
@@ -1085,7 +1107,7 @@ ${myRows?`<table style="margin-top:8px"><tr><th>날짜</th><th>내용</th><th cl
         const r=await rpc('create_trip',{...args,p_pw:$('sPw').value});
         setSess(r.id,{token:r.token,member:r.member});
         closeSheets(); toast('여행을 만들었어요. 공유 버튼으로 링크를 보내세요');
-        location.hash=r.id;
+        location.hash=r.code||r.id;
       }else{
         await rpc('update_trip',{p_token:token(),...args});
         closeSheets(); toast('설정을 저장했어요'); await load(trip.id,true); notify();
@@ -1100,10 +1122,10 @@ ${myRows?`<table style="margin-top:8px"><tr><th>날짜</th><th>내용</th><th cl
 
   /* share & nav */
   $('shareBtn').onclick=async()=>{
-    const url=location.origin+location.pathname+'#'+trip.id;
-    const text=`${trip.name} 가계부에 같이 적어요. 링크를 열고 내 이름을 골라 비밀번호를 정하면 돼요`;
+    const url=tripUrl();
+    const text=`${trip.name} 가계부에 같이 적어요. 링크를 열고 내 이름을 골라 비밀번호를 정하면 돼요${trip.code?` (여행 코드 ${trip.code})`:''}`;
     if(navigator.share){try{await navigator.share({title:trip.name,text,url});return}catch(e){if(e&&e.name==='AbortError')return}}
-    try{await navigator.clipboard.writeText(url);toast('링크를 복사했어요')}catch(_){prompt('이 링크를 복사해서 보내세요',url)}
+    try{await navigator.clipboard.writeText(url);toast(`링크를 복사했어요${trip.code?` · 코드 ${trip.code}`:''}`)}catch(_){prompt('이 링크를 복사해서 보내세요',url)}
   };
   $('backBtn').onclick=()=>{location.hash=''};
   $('fab').onclick=()=>view==='plan'?openPlan(null):openExp(null,view==='mine'?'personal':'shared');
@@ -1124,7 +1146,7 @@ ${myRows?`<table style="margin-top:8px"><tr><th>날짜</th><th>내용</th><th cl
     // 홈 화면 앱으로 처음 켰을 때는 마지막으로 연 여행을 바로 열기
     const standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
     let launched=false; try{launched=sessionStorage.getItem('tripLedger.launched')==='1';sessionStorage.setItem('tripLedger.launched','1')}catch(_){}
-    if(standalone&&!launched&&!location.hash&&myTrips()[0]) history.replaceState(null,'','#'+myTrips()[0].id);
+    if(standalone&&!launched&&!location.hash&&myTrips()[0]) history.replaceState(null,'','#'+(myTrips()[0].code||myTrips()[0].id));
     route();
   }
   if('serviceWorker' in navigator&&location.protocol!=='file:'){
