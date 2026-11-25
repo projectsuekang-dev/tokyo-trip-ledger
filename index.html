@@ -5,7 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>여행 가계부</title>
 <meta name="theme-color" content="#14bfb1">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="여행 가계부">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -159,6 +165,10 @@ select.text-in{appearance:auto}
 .setup{background:var(--coral-soft);color:var(--ink);border-radius:16px;padding:16px;margin-top:20px;font-size:14px}
 .setup code{background:var(--bg);padding:1px 6px;border-radius:6px}
 
+.open-link{display:flex;gap:8px;margin-top:10px}
+.open-link .text-in{flex:1;min-width:0}
+.open-link .btn{flex:none;height:46px;padding:0 18px;font-size:15px}
+
 /* login */
 .login-card{background:var(--surface);border-radius:18px;padding:18px;margin-top:18px}
 .login-card .chips{margin-bottom:18px}
@@ -201,6 +211,10 @@ select.text-in{appearance:auto}
   </div>
   <div id="setupMsg" class="setup" hidden></div>
   <button class="btn primary wide" id="newTripBtn">＋ 새 여행 만들기</button>
+  <form class="open-link" id="openForm">
+    <input id="openLink" class="text-in" placeholder="받은 여행 링크 붙여넣기" autocomplete="off" aria-label="여행 링크">
+    <button type="submit" class="btn ghost">열기</button>
+  </form>
   <div class="section-label" id="myTripsLabel" hidden>이 기기에서 연 여행</div>
   <div id="tripList"></div>
 </div>
@@ -534,6 +548,12 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
     $('tripList').querySelectorAll('.trip-card').forEach(b=>b.onclick=()=>{location.hash=b.dataset.id});
   }
   $('newTripBtn').onclick=()=>openSettings(true);
+  $('openForm').onsubmit=e=>{
+    e.preventDefault();
+    const m=$('openLink').value.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    if(!m) return toast('여행 링크를 그대로 붙여 넣어 주세요.');
+    $('openLink').value=''; location.hash=m[0];
+  };
 
   /* ---------- trip ---------- */
   /* ---------- login ---------- */
@@ -1101,7 +1121,14 @@ ${myRows?`<table style="margin-top:8px"><tr><th>날짜</th><th>내용</th><th cl
     showHome();
   }else{
     sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{persistSession:false}});
+    // 홈 화면 앱으로 처음 켰을 때는 마지막으로 연 여행을 바로 열기
+    const standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
+    let launched=false; try{launched=sessionStorage.getItem('tripLedger.launched')==='1';sessionStorage.setItem('tripLedger.launched','1')}catch(_){}
+    if(standalone&&!launched&&!location.hash&&myTrips()[0]) history.replaceState(null,'','#'+myTrips()[0].id);
     route();
+  }
+  if('serviceWorker' in navigator&&location.protocol!=='file:'){
+    window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
   }
 })();
 </script>
