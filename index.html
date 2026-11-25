@@ -388,7 +388,20 @@ select.text-in{appearance:auto}
     <button class="btn ghost" id="sCancel">취소</button>
     <button class="btn primary" id="sSave">저장</button>
   </div>
+  <button class="btn ghost wide" id="sExport" hidden>📥 여행 기록 저장</button>
   <button class="danger-link" id="sDelete" hidden>이 여행 삭제</button>
+</div>
+
+<!-- save sheet -->
+<div class="sheet" id="saveSheet" role="dialog" aria-modal="true" aria-labelledby="saveTitle">
+  <div class="grab"></div>
+  <h2 id="saveTitle">여행 기록 저장</h2>
+  <p class="msub" style="margin:-8px 0 16px">휴대폰이나 컴퓨터에 파일로 저장돼요. 인터넷 없이도 열려요.</p>
+  <button class="btn primary wide" id="saveHtml" style="margin-top:0">📄 여행 기록 (보기용)</button>
+  <p class="note" style="margin:8px 2px 18px">일정표, 공동 지출, 정산 결과, 내 가계부를 한 페이지에 담아요. 브라우저로 열리고, 인쇄하면 PDF로도 저장할 수 있어요.</p>
+  <button class="btn ghost wide" id="saveCsv" style="margin-top:0">📊 지출 내역 (엑셀용 CSV)</button>
+  <p class="note" style="margin:8px 2px 18px">공동 지출과 내 개인 지출을 표로 담아요. 엑셀이나 구글 시트에서 열려요.</p>
+  <div class="lock">🔒 내 개인 지출은 내 파일에만 들어가요. 다른 멤버의 개인 지출은 들어가지 않아요.</div>
 </div>
 
 <div class="toast" id="toast" role="status"></div>
@@ -756,15 +769,17 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
       return `<div class="day">${dayHead(g,sum)}${g.items.map(x=>expItem(x,'shared',sharedMeta(x))).join('')}</div>`;
     }).join(''):`<div class="empty" style="padding:28px 12px"><p>아직 공동 지출이 없어요.<br>숙소, 비행기처럼 함께 낸 돈을 아래 버튼으로 추가해 보세요.</p></div>`;
     $('settleView').innerHTML=`<div class="card"><h3>이렇게 보내면 끝</h3>${trs}</div><div class="card"><h3>멤버별 현황</h3>${rows}</div>
+      <div class="card"><h3>여행이 끝났나요?</h3><div class="msub">일정표, 지출, 정산 결과를 파일로 저장해 두면 나중에도 볼 수 있어요.</div><button class="btn primary wide" data-export style="margin-top:12px;height:46px;font-size:15px">📥 여행 기록 저장</button></div>
       <p class="note">계산 방법: ${esc(c.name)} 지출은 금액 × 기준환율${trip.fx_unit===100?' ÷ 100':''}으로 원화 환산합니다. 각 지출을 ‘나누는 사람’ 수로 똑같이 나누고, 낸 돈에서 쓴 몫을 뺀 차액으로 송금액을 정합니다. 송금 건수가 가장 적도록 큰 금액부터 연결하며 원 단위에서 반올림합니다. 기준환율을 바꾸면 모든 금액이 다시 계산됩니다.</p>
       <h3 class="section-label" style="font-size:16px;color:var(--ink);font-weight:700;margin-top:30px">공동 지출 전체 내역</h3>
       <div class="msub" style="margin:2px 2px 0">일정표에서 적은 공동 비용도 여기에 모두 모여요.</div>${list}`;
     bindItems($('settleView'));
+    $('settleView').querySelector('[data-export]').onclick=openSave;
   }
 
   /* ---------- sheets ---------- */
   function openSheet(id){$('scrim').classList.add('open');$(id).classList.add('open')}
-  function closeSheets(){$('scrim').classList.remove('open');['expSheet','setSheet','planSheet'].forEach(i=>$(i).classList.remove('open'))}
+  function closeSheets(){$('scrim').classList.remove('open');['expSheet','setSheet','planSheet','saveSheet'].forEach(i=>$(i).classList.remove('open'))}
   $('scrim').onclick=closeSheets;
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeSheets()});
 
@@ -910,6 +925,75 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
     catch(e){toast(errMsg(e))}
   };
 
+  /* ---------- 여행 기록 저장 ---------- */
+  function openSave(){closeSheets();openSheet('saveSheet')}
+  function download(name,text,type){
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([text],{type}));
+    a.download=name; document.body.appendChild(a); a.click();
+    setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1500);
+  }
+  const fileBase=()=>`${trip.name.replace(/[\\/:*?"<>|]/g,'_')}_여행기록_${ymd(new Date())}`;
+  const dayLabel=k=>{const d=days().find(x=>x.key===k);return d?(d.key==='pre'?'여행 전':`${d.label} · ${d.sub}`):'기간 밖'};
+  const dayIdx=k=>{const i=days().findIndex(x=>x.key===k);return i<0?999:i};
+  const amtTxt=x=>x.currency==='FX'?fxStr(x.amount):won(x.amount);
+  const byTime=(a,b)=>(a.start_time||'99')<(b.start_time||'99')?-1:(a.start_time||'99')>(b.start_time||'99')?1:0;
+
+  function exportHtml(){
+    const {bal,paid,owe}=balances(), tr=transfers(bal), c=fx();
+    const total=expenses.reduce((t,x)=>t+toKRW(x),0);
+    const my=[...mine.map(x=>({x,kind:'개인',krw:toKRW(x)})),...expenses.filter(x=>shareOf(x)>0).map(x=>({x,kind:'공동 (내 몫)',krw:shareOf(x)}))]
+      .sort((a,b)=>dayIdx(a.x.day)-dayIdx(b.x.day));
+    const myTotal=my.reduce((s,r)=>s+r.krw,0);
+    const plan=dayGroups(plans).filter(g=>g.items.length).map(g=>`<h3>${esc(dayLabel(g.key))}</h3>`+[...g.items].sort(byTime).map(p=>{
+      const costs=planCosts(p.id).map(({x,kind})=>`${catOf(x.category).e} ${esc(amtTxt(x))} ${kind==='personal'?'(개인)':'('+esc(splitTxt(x))+')'}`).join(' · ');
+      return `<div class="pl"><span class="tm">${esc(p.start_time||'')}</span><div><b>${esc(p.title)}</b> <a href="${esc(mapUrl(p))}">지도</a>${p.memo?`<div class="m">${esc(p.memo)}</div>`:''}${costs?`<div class="m">${costs}</div>`:''}</div></div>`;
+    }).join('')).join('')||'<p class="m">일정이 없어요.</p>';
+    const dShort=k=>{const d=days().find(x=>x.key===k);return d?(d.key==='pre'?'여행 전':`${d.label}<br><span class="m">${d.short}</span>`):'기간 밖'};
+    const what=x=>`${catOf(x.category).e} ${esc(x.title||catOf(x.category).n)}`;
+    const expRows=[...expenses].sort((a,b)=>dayIdx(a.day)-dayIdx(b.day)).map(x=>`<tr><td>${dShort(x.day)}</td><td>${what(x)}<div class="m">${esc(mName(x.payer))} 결제 · ${esc(splitTxt(x))} 나눔</div></td><td class="r">${won(toKRW(x))}${x.currency==='FX'?`<div class="m">${esc(amtTxt(x))}</div>`:''}</td></tr>`).join('');
+    const myRows=my.map(r=>`<tr><td>${dShort(r.x.day)}</td><td>${what(r.x)}<div class="m">${r.kind}</div></td><td class="r">${won(r.krw)}</td></tr>`).join('');
+    const signed=v=>v>=0.5?'+'+won(v):v<=-0.5?'−'+won(-v):won(0);
+    const doc=`<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(trip.name)} 여행 기록</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;color:#1d2127;max-width:760px;margin:0 auto;padding:24px 16px 48px;line-height:1.55;font-size:14px}
+h1{font-size:26px;margin:0}h2{font-size:18px;margin:34px 0 8px;padding-bottom:6px;border-bottom:2px solid #14bfb1}h3{font-size:15px;margin:18px 0 6px}
+.sub,.m{color:#868c96;font-size:13px}.big{font-size:28px;font-weight:700}a{color:#0e9488}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:7px 6px;border-bottom:1px solid #eceef1;text-align:left;vertical-align:top}th{color:#868c96;font-weight:600}.r{text-align:right;white-space:nowrap}td:first-child{white-space:nowrap;width:1%}td .m{font-size:12px}
+.pl{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #f1f2f4}.tm{color:#14bfb1;font-weight:700;min-width:44px}
+.box{background:#f6f7f9;border-radius:12px;padding:12px 14px;margin-top:10px}.lock{color:#868c96;font-size:12.5px;margin-top:6px}
+@media print{body{padding:0}a{color:inherit}h2{break-after:avoid}}
+</style></head><body>
+<h1>${esc(trip.name)}</h1>
+<div class="sub">${esc(dateRange(trip.start_date,trip.end_date))} · ${trip.members.map(m=>esc(m.name)).join(', ')} · 기준환율 ${trip.fx_unit===100?'100':'1'}${c.code} = ${fmt(trip.rate,2)}원</div>
+<div class="sub">${esc(mName(me))}님이 ${ymd(new Date())}에 저장한 기록</div>
+<h2>정산</h2><div class="big">${won(total)}</div><div class="sub">공동 지출 합계 · 1인 평균 ${won(trip.members.length?total/trip.members.length:0)}</div>
+<div class="box"><b>송금</b>${tr.length?tr.map(t=>`<div>${esc(mName(t.from))} → ${esc(mName(t.to))} <b>${won(t.amt)}</b></div>`).join(''):'<div>보낼 돈이 없어요. 모두 정산 완료!</div>'}</div>
+<table style="margin-top:10px"><tr><th>멤버</th><th class="r">낸 돈</th><th class="r">쓴 몫</th><th class="r">차액</th></tr>${trip.members.map(m=>`<tr><td>${esc(m.name)}</td><td class="r">${won(paid[m.id])}</td><td class="r">${won(owe[m.id])}</td><td class="r">${signed(bal[m.id])}</td></tr>`).join('')}</table>
+<h2>일정표</h2>${plan}
+<h2>공동 지출 내역</h2>${expRows?`<table><tr><th>날짜</th><th>내용</th><th class="r">금액</th></tr>${expRows}</table>`:'<p class="m">공동 지출이 없어요.</p>'}
+<h2>${esc(mName(me))}님의 가계부</h2><div class="big">${won(myTotal)}</div><div class="lock">🔒 개인 지출과 공동 지출 중 내 몫이에요. ${esc(mName(me))}님만의 기록이에요.</div>
+${myRows?`<table style="margin-top:8px"><tr><th>날짜</th><th>내용</th><th class="r">금액</th></tr>${myRows}</table>`:'<p class="m">기록이 없어요.</p>'}
+</body></html>`;
+    download(fileBase()+'.html',doc,'text/html;charset=utf-8');
+    toast('여행 기록 파일을 저장했어요');
+  }
+
+  function exportCsv(){
+    const q=v=>{let s=String(v??'');if(typeof v==='string'&&/^[=+\-@]/.test(s))s="'"+s;return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
+    const cur=x=>x.currency==='FX'?trip.fx_cur:'KRW';
+    const head=['구분','날짜','분류','내용','금액','통화','원화 환산','결제한 사람','나눈 사람','내 몫(원)','일정'];
+    const rows=[
+      ...expenses.map(x=>({d:x.day,r:['공동',dayLabel(x.day),catOf(x.category).n,x.title,Number(x.amount),cur(x),Math.round(toKRW(x)),mName(x.payer),x.split.map(mName).join(' '),Math.round(shareOf(x)),planTitle(x.plan_id)||'']})),
+      ...mine.map(x=>({d:x.day,r:['개인',dayLabel(x.day),catOf(x.category).n,x.title,Number(x.amount),cur(x),Math.round(toKRW(x)),mName(me),'',Math.round(toKRW(x)),planTitle(x.plan_id)||'']}))
+    ].sort((a,b)=>dayIdx(a.d)-dayIdx(b.d)).map(o=>o.r);
+    download(fileBase()+'.csv','﻿'+[head,...rows].map(r=>r.map(q).join(',')).join('\r\n'),'text/csv;charset=utf-8');
+    toast('지출 내역 파일을 저장했어요');
+  }
+  $('saveHtml').onclick=exportHtml;
+  $('saveCsv').onclick=exportCsv;
+  $('sExport').onclick=openSave;
+
   /* settings (create + edit) */
   let draft=null, creating=false;
   $('sCur').innerHTML=CURS.map(c=>`<option value="${c.code}">${c.flag} ${c.name} (${c.code})</option>`).join('');
@@ -924,7 +1008,7 @@ const SUPABASE_KEY = 'sb_publishable_ZzulMFPiCpBFT9gJcRArQA_7ps8M_D7';  // publi
     }else draft={...trip,members:trip.members.map(m=>({...m}))};
     $('setTitle').textContent=isNew?'새 여행 만들기':'여행 설정';
     $('sSave').textContent=isNew?'만들기':'저장';
-    $('sDelete').hidden=isNew;
+    $('sDelete').hidden=isNew; $('sExport').hidden=isNew;
     $('sPwWrap').hidden=!isNew; $('sPw').value='';
     $('sMemberNote').textContent=isNew?'':'🔑 버튼: 비밀번호를 잊은 멤버의 비밀번호를 초기화해요. 그 멤버의 개인 지출도 함께 지워져요.';
     $('sName').value=draft.name; $('sCur').value=draft.fx_cur; $('sRate').value=draft.rate;
