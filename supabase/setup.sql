@@ -98,6 +98,9 @@ alter table public.personal_expenses add column if not exists plan_id uuid refer
 create index if not exists expenses_plan_idx on public.expenses (plan_id);
 create index if not exists personal_plan_idx on public.personal_expenses (plan_id);
 
+-- 일정표 순서 (드래그로 바꾼 순서. null이면 시간순)
+alter table public.plans add column if not exists sort_order int;
+
 -- 짧은 여행 코드 (헷갈리는 글자 0 O 1 I L 제외, 6자리) — 링크와 앱 입력용
 create or replace function public._new_trip_code()
 returns text
@@ -259,7 +262,7 @@ begin
     'pw_set', coalesce((select jsonb_agg(c.member_id) from trip_creds c where c.trip_id = t.id), '[]'::jsonb),
     'expenses', coalesce((select jsonb_agg(to_jsonb(e) order by e.created_at)
                             from expenses e where e.trip_id = t.id), '[]'::jsonb),
-    'plans', coalesce((select jsonb_agg(to_jsonb(p) order by p.day, p.start_time, p.created_at)
+    'plans', coalesce((select jsonb_agg(to_jsonb(p) order by p.day, p.sort_order nulls last, p.start_time, p.created_at)
                          from plans p where p.trip_id = t.id), '[]'::jsonb),
     'mine', coalesce((select jsonb_agg(to_jsonb(x) - 'member_id' order by x.created_at)
                         from personal_expenses x
@@ -376,6 +379,19 @@ begin
   delete from plans where id = p_id and trip_id = a.o_trip;
 end $$;
 
+-- 드래그로 순서 바꾸기: p_ids 순서대로 그날(p_day)의 순서를 매김. 다른 날로 옮긴 일정도 함께 처리
+create or replace function public.reorder_plans(p_token uuid, p_day text, p_ids uuid[])
+returns void
+language plpgsql security definer set search_path = public as $$
+declare a record;
+begin
+  select * into a from _auth(p_token);
+  if p_day is null or char_length(p_day) > 10 then raise exception 'bad day'; end if;
+  if coalesce(array_length(p_ids, 1), 0) > 500 then raise exception 'too many plans'; end if;
+  update plans set day = p_day, sort_order = array_position(p_ids, id)
+   where trip_id = a.o_trip and id = any(p_ids);
+end $$;
+
 -- ---------------------------------------------------------------- 개인 지출 (본인만)
 create or replace function public.save_personal(
   p_token uuid, p_id uuid, p_amount numeric, p_currency text, p_category text,
@@ -429,6 +445,7 @@ grant execute on function
   public.delete_expense(uuid, uuid),
   public.save_plan(uuid, uuid, text, text, text, text, text, numeric, numeric, numeric, text),
   public.delete_plan(uuid, uuid),
+  public.reorder_plans(uuid, text, uuid[]),
   public.save_personal(uuid, uuid, numeric, text, text, text, text, uuid),
   public.delete_personal(uuid, uuid)
 to anon, authenticated;
